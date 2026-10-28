@@ -18,7 +18,7 @@ export async function certificadoPDF(c, inst) {
   const aCargo = c.aCargo ?? inst?.aCargo ?? '-'
 
   // encabezado
-  doc.setFillColor(28, 30, 33)
+  doc.setFillColor(30, 142, 62)
   doc.rect(0, 0, W, 30, 'F')
   doc.setTextColor(255, 255, 255)
   doc.setFont('helvetica', 'bold')
@@ -60,7 +60,7 @@ export async function certificadoPDF(c, inst) {
   y += 4
   const cols = [M, M + 20, M + 70, M + 120, W - M]
   const head = ['N°', 'Valor real (mm)', 'Valor hallado (mm)', 'Error (mm)']
-  doc.setFillColor(255, 106, 26)
+  doc.setFillColor(22, 107, 47)
   doc.rect(M, y, W - 2 * M, 8, 'F')
   doc.setTextColor(255, 255, 255)
   doc.setFont('helvetica', 'bold')
