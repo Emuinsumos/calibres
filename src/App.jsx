@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { escuchar, guardar, borrar, nuevoId, modo } from './db.js'
 import { certificadoPDF } from './certificado.js'
+import { etiquetasPDF } from './etiquetas.js'
 
 const TIPOS = ['Vernier', 'Micrómetro', 'Alesómetro', 'Tapón P-NP', 'Otro']
 const MODALIDADES = ['Mecánico', 'Digital']
@@ -143,9 +144,11 @@ export default function App() {
         <button className={`tab ${tab === 'panel' ? 'on' : ''}`} onClick={() => setTab('panel')}>
           Vencimientos{nVenc > 0 && <span className="n">{nVenc}</span>}
         </button>
+        <button className={`tab ${tab === 'escanear' ? 'on' : ''}`} onClick={() => setTab('escanear')}>Escanear</button>
         <button className={`tab ${tab === 'instrumentos' ? 'on' : ''}`} onClick={() => { setTab('instrumentos'); setEditando(null) }}>Instrumentos</button>
         <button className={`tab ${tab === 'control' ? 'on' : ''}`} onClick={() => setTab('control')}>Registrar control</button>
         <button className={`tab ${tab === 'historial' ? 'on' : ''}`} onClick={() => setTab('historial')}>Historial</button>
+        <button className={`tab ${tab === 'etiquetas' ? 'on' : ''}`} onClick={() => setTab('etiquetas')}>Etiquetas</button>
         <button className={`tab ${tab === 'tolerancias' ? 'on' : ''}`} onClick={() => setTab('tolerancias')}>Tolerancias</button>
       </div>
 
@@ -172,6 +175,10 @@ export default function App() {
         />
       )}
       {tab === 'historial' && <Historial lista={lista} controles={controles} mostrar={mostrar} />}
+      {tab === 'escanear' && (
+        <Escaner lista={lista} controles={controles} tols={tols} irAControl={irAControl} mostrar={mostrar} />
+      )}
+      {tab === 'etiquetas' && <Etiquetas lista={lista} mostrar={mostrar} />}
       {tab === 'tolerancias' && <Tolerancias tols={tols} mostrar={mostrar} />}
 
       {toast && <div className="toast">{toast}</div>}
@@ -310,6 +317,7 @@ function Instrumentos({ lista, tols, editando, setEditando, irAControl, mostrar 
               <div className="row" style={{ marginTop: 8 }}>
                 <button className="btn small" onClick={() => irAControl(i.id)}>Registrar control</button>
                 <button className="btn small sec" onClick={() => setEditando(i.id)}>Editar</button>
+                <button className="btn small sec" onClick={() => etiquetasPDF([i]).catch(() => mostrar('No se pudo generar la etiqueta'))}>Etiqueta</button>
               </div>
             </div>
             <span className={`estado ${e.clase}`}>{e.texto}</span>
@@ -670,6 +678,212 @@ function Tolerancias({ tols, mostrar }) {
       {err && <div style={{ color: 'var(--bad)', marginTop: 8 }}>{err}</div>}
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn" onClick={guardarTodo}>Guardar tolerancias</button>
+      </div>
+    </div>
+  )
+}
+
+// ---------- Escáner (cámara + código escrito o lector USB/Bluetooth) ----------
+function Escaner({ lista, controles, tols, irAControl, mostrar }) {
+  const [encId, setEncId] = useState(null)
+  const [manual, setManual] = useState('')
+  const [camara, setCamara] = useState(false)
+  const [err, setErr] = useState('')
+  const videoRef = useRef(null)
+  const streamRef = useRef(null)
+  const timerRef = useRef(null)
+  const buscarRef = useRef(null)
+  const soporta = typeof window !== 'undefined' && 'BarcodeDetector' in window
+
+  const parar = () => {
+    clearInterval(timerRef.current)
+    timerRef.current = null
+    if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+    setCamara(false)
+  }
+  useEffect(() => parar, [])
+
+  const buscar = (texto) => {
+    const t = String(texto || '').trim().toLowerCase()
+    if (!t) return false
+    const inst = lista.find((i) => i.codigo.trim().toLowerCase() === t)
+    if (!inst) {
+      setErr(`No hay ningún instrumento con el código "${String(texto).trim()}".`)
+      return false
+    }
+    setErr('')
+    setEncId(inst.id)
+    setManual('')
+    try { navigator.vibrate && navigator.vibrate(120) } catch { /* nada */ }
+    return true
+  }
+  buscarRef.current = buscar
+
+  const iniciar = async () => {
+    setErr('')
+    setEncId(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+      streamRef.current = stream
+      setCamara(true)
+      await new Promise((r) => setTimeout(r, 80)) // esperar a que exista el <video>
+      const v = videoRef.current
+      v.srcObject = stream
+      await v.play()
+      const soportados = await window.BarcodeDetector.getSupportedFormats()
+      const formats = ['code_128', 'qr_code', 'code_39', 'ean_13'].filter((f) => soportados.includes(f))
+      const det = new window.BarcodeDetector({ formats })
+      timerRef.current = setInterval(async () => {
+        try {
+          const r = await det.detect(v)
+          if (r.length && buscarRef.current(r[0].rawValue)) parar()
+        } catch { /* frame todavía no listo */ }
+      }, 300)
+    } catch (e) {
+      console.error(e)
+      parar()
+      setErr('No se pudo abrir la cámara. Revisá el permiso de cámara del navegador para este sitio.')
+    }
+  }
+
+  const inst = encId ? lista.find((i) => i.id === encId) : null
+  const ultimo = inst
+    ? Object.entries(controles)
+        .map(([id, c]) => ({ ...c, id }))
+        .filter((c) => c.instrumentoId === inst.id)
+        .sort((x, y) => (y.fecha || '').localeCompare(x.fecha || '') || (y.creado || 0) - (x.creado || 0))[0]
+    : null
+
+  return (
+    <>
+      <div className="card">
+        <h2>Escanear etiqueta</h2>
+        {!camara && (
+          <div className="row">
+            <button className="btn" onClick={iniciar} disabled={!soporta}>Abrir cámara</button>
+          </div>
+        )}
+        {!soporta && (
+          <div className="nota">
+            Este navegador no lee códigos con la cámara. Usá Chrome en Android, o escribí el código (o usá un lector) en el campo de abajo.
+          </div>
+        )}
+        {camara && (
+          <>
+            <video ref={videoRef} playsInline muted style={{ width: '100%', borderRadius: 8, background: '#000' }} />
+            <div className="nota">Apuntá al código de barras de la etiqueta.</div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <button className="btn sec" onClick={parar}>Cerrar cámara</button>
+            </div>
+          </>
+        )}
+        <div style={{ marginTop: 14 }}>
+          <label>O escribí / escaneá con lector el código</label>
+          <div className="row">
+            <input
+              className="mono" style={{ flex: 1, minWidth: 140 }} value={manual} placeholder="Código del instrumento"
+              onChange={(e) => setManual(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && buscar(manual)}
+            />
+            <button className="btn" onClick={() => buscar(manual)}>Buscar</button>
+          </div>
+        </div>
+        {err && <div style={{ color: 'var(--bad)', marginTop: 8 }}>{err}</div>}
+      </div>
+
+      {inst && (() => {
+        const e = estadoDe(inst)
+        const t = tolDe(inst, tols)
+        const datos = [
+          ['Tipo', `${inst.tipo === 'Otro' ? inst.tipoOtro || 'Otro' : inst.tipo} · ${inst.modalidad}`],
+          ['Marca', inst.marca || '—'],
+          ['N° de fabricación', inst.nroFab || '—'],
+          ['A cargo de', inst.aCargo || '—'],
+          ['Apreciación', inst.apreciacion ? `${inst.apreciacion} mm` : '—'],
+          ['Frecuencia de control', inst.frecMeses ? `${inst.frecMeses} meses` : '—'],
+          ['Última revisión', fmt(inst.ultimaRevision)],
+          ['Vencimiento', fmt(inst.vencimiento)],
+          ['Tolerancia', t ? `${t.valor} mm (${t.origen})` : 'sin definir'],
+        ]
+        return (
+          <div className="card">
+            <div className="row">
+              <div className="mono" style={{ fontSize: 24, fontWeight: 700 }}>{inst.codigo}</div>
+              <span className="sp" />
+              <span className={`estado ${e.clase}`}>{e.texto}</span>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              {datos.map(([k, v]) => (
+                <div className="alerta" key={k}><span style={{ color: 'var(--muted)' }}>{k}</span><b>{v}</b></div>
+              ))}
+            </div>
+            <div className="nota">
+              {ultimo
+                ? `Último control: ${fmt(ultimo.fecha)} · ${ultimo.resultado}${ultimo.errorMax != null ? ` · error máx. ${Number(ultimo.errorMax).toFixed(5)} mm` : ''}`
+                : 'Todavía no tiene controles registrados.'}
+            </div>
+            <div className="row" style={{ marginTop: 12 }}>
+              <button className="btn" onClick={() => irAControl(inst.id)}>Registrar control</button>
+              {ultimo && (
+                <button className="btn sec" onClick={() => certificadoPDF(ultimo, inst).catch(() => mostrar('No se pudo generar el PDF'))}>
+                  Último certificado
+                </button>
+              )}
+              <button className="btn sec" onClick={() => { setEncId(null); iniciar() }} disabled={!soporta}>Escanear otro</button>
+            </div>
+          </div>
+        )
+      })()}
+    </>
+  )
+}
+
+// ---------- Etiquetas con código de barras ----------
+function Etiquetas({ lista, mostrar }) {
+  const [q, setQ] = useState('')
+  const [sel, setSel] = useState({})
+  const activos = lista.filter((i) => i.activo !== false)
+  const filtrada = activos
+    .filter((i) => `${i.codigo} ${i.tipo} ${i.tipoOtro || ''} ${i.marca}`.toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => a.codigo.localeCompare(b.codigo, 'es', { numeric: true }))
+  const elegidos = activos.filter((i) => sel[i.id])
+
+  const marcar = (v) => {
+    const n = { ...sel }
+    filtrada.forEach((i) => { n[i.id] = v })
+    setSel(n)
+  }
+  const generar = async () => {
+    try {
+      await etiquetasPDF(elegidos.sort((a, b) => a.codigo.localeCompare(b.codigo, 'es', { numeric: true })))
+    } catch (e) {
+      console.error(e)
+      mostrar('No se pudo generar el PDF')
+    }
+  }
+
+  return (
+    <div className="card">
+      <h2>Etiquetas con código de barras</h2>
+      <div className="nota" style={{ marginTop: 0, marginBottom: 10 }}>
+        Elegí los instrumentos y generá un PDF con etiquetas de 63 × 33 mm (24 por hoja A4). El código de barras es el código del instrumento.
+      </div>
+      <input placeholder="Buscar…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="row" style={{ margin: '10px 0' }}>
+        <button className="btn sec small" onClick={() => marcar(true)}>Marcar todos</button>
+        <button className="btn sec small" onClick={() => marcar(false)}>Desmarcar</button>
+        <span className="sp" />
+        <span className="nota">{elegidos.length} elegidos</span>
+      </div>
+      {filtrada.length === 0 && <div className="vacio">No hay instrumentos para mostrar.</div>}
+      {filtrada.map((i) => (
+        <label key={i.id} className="lista-item" style={{ gridTemplateColumns: 'auto 1fr', alignItems: 'center', cursor: 'pointer', textTransform: 'none', letterSpacing: 0, fontSize: 14, color: 'var(--text)', marginBottom: 6 }}>
+          <input type="checkbox" style={{ width: 20, height: 20 }} checked={!!sel[i.id]} onChange={(e) => setSel({ ...sel, [i.id]: e.target.checked })} />
+          <span><b className="mono">{i.codigo}</b> <span className="meta">· {i.tipo === 'Otro' ? i.tipoOtro || 'Otro' : i.tipo} · {i.modalidad}</span></span>
+        </label>
+      ))}
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="btn" onClick={generar} disabled={!elegidos.length}>Generar PDF de etiquetas</button>
       </div>
     </div>
   )
